@@ -1,0 +1,120 @@
+# 🌀 氣象署颱風路徑圖 → GitHub Pages（tc-trackmap）
+# 觸發：
+#   ① Apps Script 發現氣象署 W-C0034-005 有「新的一報」→ workflow_dispatch（主要，約 5–15 分鐘內）
+#      （也接受 repository_dispatch，event_type＝cwa-typhoon，二選一即可）
+#   ② 下面的 cron 每 30 分鐘（備援；GitHub 排程常延遲）——線上 manifest 已是最新就直接結束，不安裝套件、不部署
+#   ③ Actions 頁面手動按 Run workflow
+# 資料：氣象署 S3 公開鏡像（不用金鑰、不吃配額）；只有 S3 失敗或還沒更新時才用 secrets.CWA_API_KEY 打 1 次（不設也能跑，絕不會印出）
+# 輸出：https://<帳號>.github.io/tc-trackmap/tc/manifest.json、tc/<id>.png、tc/archive/<id>/<報>.png（每顆保留最近 10 報）
+name: tc-trackmap
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '就算線上已是最新也重新繪圖（測試用）'
+        type: boolean
+        default: false
+      expect:
+        description: '（Apps Script 自動填）應該要有的報，例如 2026-ty30@202610242000'
+        type: string
+        default: ''
+  repository_dispatch:
+    types: [cwa-typhoon]
+
+concurrency:
+  group: tc-trackmap
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      skip: ${{ steps.quick.outputs.skip }}
+    steps:
+      - name: 取得程式碼
+        uses: actions/checkout@v7
+
+      - name: 讀取 GitHub Pages 網址
+        id: pages
+        uses: actions/configure-pages@v6
+
+      # 只用內建 python3：抓 S3 → 和線上 manifest 比對；一樣就結束
+      - name: 快速檢查（線上已是最新就略過）
+        id: quick
+        env:
+          PAGES_BASE: ${{ steps.pages.outputs.base_url }}/
+          CWA_API_KEY: ${{ secrets.CWA_API_KEY }}
+          TC_EXPECT: ${{ inputs.expect || github.event.client_payload.expect || '' }}
+          IN_FORCE: ${{ inputs.force }}
+        run: |
+          ARGS="--check --out site"
+          if [ "$IN_FORCE" = "true" ]; then ARGS="$ARGS --force"; fi
+          python3 scripts/tc_trackmap.py $ARGS
+
+      - name: 安裝 Python 3.12（含 pip 快取）
+        if: steps.quick.outputs.skip != 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 海岸線＋中文字型快取
+        if: steps.quick.outputs.skip != 'true'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.local/share/cartopy
+            fonts
+          key: tc-trackmap-ne50m-notosanstc-v1
+
+      - name: 下載中文字型（快取沒有才下載）
+        if: steps.quick.outputs.skip != 'true'
+        run: |
+          mkdir -p fonts
+          for w in Regular Bold; do
+            [ -s "fonts/NotoSansTC-$w.otf" ] || curl -fsSL --retry 3 -o "fonts/NotoSansTC-$w.otf" \
+              "https://github.com/notofonts/noto-cjk/raw/main/Sans/SubsetOTF/TC/NotoSansTC-$w.otf"
+          done
+          ls -la fonts
+
+      - name: 安裝套件
+        if: steps.quick.outputs.skip != 'true'
+        run: pip install -r requirements.txt
+
+      - name: 繪製颱風路徑圖
+        if: steps.quick.outputs.skip != 'true'
+        env:
+          PAGES_BASE: ${{ steps.pages.outputs.base_url }}/
+          MPLBACKEND: Agg
+          SRC: ${{ steps.quick.outputs.source }}
+        run: python scripts/tc_trackmap.py --input site/_raw.json --source-label "$SRC" --out site
+
+      - name: 打包網站
+        if: steps.quick.outputs.skip != 'true'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 部署到 GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
