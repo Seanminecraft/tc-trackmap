@@ -1,0 +1,7 @@
+# 颱風路徑圖（GitHub Actions 用；Python 3.12）
+cartopy==0.26.0
+pyproj>=3.6
+matplotlib>=3.9,<4
+shapely>=2.0
+pillow>=11
+numpy>=2.0
