@@ -798,7 +798,7 @@ def render_storm(s, meta, out_png, logo_path=None, generated=None, source_label=
     fc_note = "預報點暴風半徑氣象署只提供單一半徑" if fc else "本報無預報點"
     if tw_in and (n10 or n7only):
         fc_note += "；鄉鎮著色＝與現在位置七級／十級風圈有任何重疊（球面距離）"
-    foot = ["資料來源：中央氣象署開放資料 W-C0034-005（颱風路徑、七級／十級風暴風半徑、70%% 機率半徑%s）；底圖：Natural Earth；縣市／鄉鎮界：內政部國土測繪中心（taiwan-atlas 2021）" % sent,
+    foot = ["資料來源：中央氣象署（颱風路徑、七級／十級風暴風半徑、70%% 機率半徑%s）；底圖：Natural Earth；縣市／鄉鎮界：內政部國土測繪中心（taiwan-atlas 2021）" % sent,
             "風圈：現在位置使用氣象署四象限半徑（NE／SE／SW／NW）；%s，以圓表示" % fc_note,
             "氣象資料僅供參考，預報請依氣象署發布為準，並勿作為重大決策使用。",
             "繪圖時間 %s（臺灣時間）｜所有時間皆為臺灣時間（UTC+8）" % generated.strftime("%Y-%m-%d %H:%M")]
