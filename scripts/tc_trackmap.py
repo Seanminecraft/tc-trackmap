@@ -13,6 +13,9 @@ tc_trackmap.py — 氣象署颱風路徑圖（每顆颱風一張 PNG）＋ manif
   python3 scripts/tc_trackmap.py --check            # 只用標準函式庫：有沒有新的一報？（寫 skip=true/false 到 GITHUB_OUTPUT）
   python scripts/tc_trackmap.py --out site           # 抓資料、畫圖、輸出 site/tc/…
   python scripts/tc_trackmap.py --input x.json --out preview --no-history   # 用本機檔案測試
+
+顯示規則：氣象署資料為空，或最後一報（分析／預報初始時間較晚者）已超過 12 小時，
+就不顯示該顆氣旋（改為「目前沒有活動中的熱帶氣旋」）。--at 可指定判斷用的時間（測試用）。
 """
 import argparse
 import datetime as dt
@@ -26,7 +29,7 @@ import time
 import urllib.error
 import urllib.request
 
-SCRIPT_VERSION = "tc-trackmap 1.1"
+SCRIPT_VERSION = "tc-trackmap 1.2"
 TPE = dt.timezone(dt.timedelta(hours=8))
 S3_URL = "https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Warning/W-C0034-005.json"
 DATASTORE_URL = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/W-C0034-005?format=JSON&Authorization="
@@ -56,7 +59,9 @@ def http_get(url, timeout=30):
 
 def fetch_raw(expect=None, wait_s=240):
     """回傳 (raw_json, 來源說明)。expect＝Apps Script 傳來的「應該要有的報」，S3 還沒更新就等一下、再不行才用金鑰。"""
-    deadline = time.time() + (wait_s if expect else 0)
+    # expect=none 表示已無須顯示，不必等 S3 清空（資料可能仍留著最後一報）
+    waiting = bool(expect) and str(expect).strip() not in ("", "none")
+    deadline = time.time() + (wait_s if waiting else 0)
     last_err = None
     while True:
         try:
@@ -214,6 +219,34 @@ def storm_sig(s):
 
 def all_sig(storms):
     return hashlib.sha1((SCRIPT_VERSION + "|" + "|".join(s["id"] + ":" + s["sig"] for s in storms)).encode()).hexdigest()[:16]
+
+
+# 最後一報超過此時長就不再顯示（與儀表板「颱風消息」同一規則）
+STALE_AFTER = dt.timedelta(hours=12)
+
+
+def parse_now(s=None):
+    """判斷過期用的臺灣時間。s 為 ISO（測試 --at）；空則現在。"""
+    if not s:
+        return dt.datetime.now(TPE)
+    t0 = dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    if t0.tzinfo is None:
+        t0 = t0.replace(tzinfo=TPE)
+    return t0.astimezone(TPE)
+
+
+def storm_is_current(s, now=None):
+    """s['issue'] 為最後一報時間（分析與預報初始時間較晚者）。未滿 12 小時才顯示。"""
+    now = now or dt.datetime.now(TPE)
+    issue = s.get("issue")
+    if not issue:
+        return True
+    return now < issue + STALE_AFTER
+
+
+def current_storms(storms, now=None):
+    now = now or dt.datetime.now(TPE)
+    return [s for s in storms if storm_is_current(s, now)]
 
 
 # ------------------------------------------------------------------ 分類與單位
@@ -846,10 +879,10 @@ def load_prev_manifest(base):
         return None
 
 
-def build_site(storms, meta, out, base, prev, source, logo, history=True):
+def build_site(storms, meta, out, base, prev, source, logo, history=True, now=None):
     tcdir = os.path.join(out, "tc")
     os.makedirs(tcdir, exist_ok=True)
-    now = dt.datetime.now(TPE)
+    now = now or dt.datetime.now(TPE)
     prev_storms = {}
     for ps in (prev or {}).get("storms", []):
         prev_storms[ps.get("id")] = ps
@@ -943,6 +976,7 @@ def main():
     ap.add_argument("--expect", default=os.environ.get("TC_EXPECT", ""), help="Apps Script 傳來的 id@yyyymmddHHMM，逗號分隔")
     ap.add_argument("--no-history", action="store_true")
     ap.add_argument("--source-label", default="", help="配合 --input：manifest 上寫的資料來源（S3／datastore）")
+    ap.add_argument("--at", default="", help="判斷是否過期用的臺灣時間（ISO），測試用；預設為現在")
     ap.add_argument("--logo", default=os.path.join(ROOT, "assets", "logo.png"))
     a = ap.parse_args()
     base = (os.environ.get("PAGES_BASE") or "").strip()
@@ -953,23 +987,30 @@ def main():
         raw, source = json.load(open(a.input, encoding="utf-8")), (a.source_label or "本機檔案")
     else:
         raw, source = fetch_raw(a.expect.strip() or None)
+    now = parse_now(a.at)
     storms, meta = normalize(raw)
-    sig = all_sig(storms)
-    log("📡 來源 %s：%d 顆 %s｜sig %s" % (source, len(storms), "、".join("%s(%s %s)" % (s["id"], s["name"] or s["enName"], s["issue"].strftime("%m/%d %H:%M")) for s in storms) or "（無）", sig))
+    shown = current_storms(storms, now)
+    sig = all_sig(shown)
+    dropped = len(storms) - len(shown)
+    log("📡 來源 %s：%d 顆%s %s｜sig %s" % (
+        source, len(shown),
+        ("（已隱藏 %d 顆，最後一報超過 12 小時）" % dropped) if dropped else "",
+        "、".join("%s(%s %s)" % (s["id"], s["name"] or s["enName"], s["issue"].strftime("%m/%d %H:%M")) for s in shown) or "（無）",
+        sig))
 
     prev = load_prev_manifest(base)
     if a.check:
         same = bool(prev) and prev.get("sig") == sig and not a.force
-        log("⏭️ 線上已是最新（不畫圖、不部署）" if same else "🆕 有新資料（或第一次／強制），要畫圖")
+        log("⏭️ 線上已是最新（不畫圖、不部署）" if same else "🆕 有新資料（或第一次／強制／過期應隱藏），要畫圖")
         gh_output("skip", "true" if same else "false")
         # 把這次抓到的原始檔留給下一步，避免重抓
         os.makedirs(a.out, exist_ok=True)
         with open(os.path.join(a.out, "_raw.json"), "w", encoding="utf-8") as f:
             json.dump(raw, f, ensure_ascii=False)
         gh_output("source", source)
-        gh_output("count", str(len(storms)))
+        gh_output("count", str(len(shown)))
         return 0
-    man = build_site(storms, meta, a.out, base, prev, source, a.logo, history=not a.no_history)
+    man = build_site(shown, meta, a.out, base, prev, source, a.logo, history=not a.no_history, now=now)
     raw_cache = os.path.join(a.out, "_raw.json")
     if os.path.exists(raw_cache):
         os.remove(raw_cache)
